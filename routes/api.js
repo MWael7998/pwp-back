@@ -42,10 +42,12 @@ function buildBracket(registeredUsers, winners = {}) {
   const r1Matches = []
   for (let i = 0; i < registeredUsers.length; i += 2) {
     if (i + 1 < registeredUsers.length) {
+      const id = matchCounter++
       r1Matches.push({
-        id: matchCounter++,
+        id,
         playerA: registeredUsers[i],
         playerB: registeredUsers[i + 1],
+        winner: winners[id] || null,
       })
     }
   }
@@ -59,10 +61,12 @@ function buildBracket(registeredUsers, winners = {}) {
       const first = prevMatches[i]
       const second = prevMatches[i + 1]
       if (first && second) {
+        const id = matchCounter++
         nextMatches.push({
-          id: matchCounter++,
+          id,
           playerA: winners[first.id] || `Winner of M${first.id}`,
           playerB: winners[second.id] || `Winner of M${second.id}`,
+          winner: winners[id] || null,
         })
       }
     }
@@ -131,7 +135,13 @@ router.post('/register/:id', (req, res) => {
   if (getRegisteredCount(id) >= tournament.players) {
     return res.status(400).json({ error: 'Tournament is full' })
   }
+  if ((req.session.points || 0) < tournament.entryFee) {
+    return res.status(402).json({
+      error: `Insufficient points. This tournament requires ${tournament.entryFee} points but you only have ${req.session.points || 0}.`,
+    })
+  }
 
+  req.session.points = (req.session.points || 0) - tournament.entryFee
   registrations[id].push({ sessionId, name: userName })
 
   const registeredCount = getRegisteredCount(id)
@@ -174,11 +184,16 @@ router.get('/tournaments/:id', (req, res) => {
   const alreadyRegistered = registrations[id].some((r) => r.name === userName)
   if (!alreadyRegistered) {
     if (getRegisteredCount(id) >= tournament.players) {
-      registrationMessage = 'Tournament is full; you cannot be auto-registered.'
+      return res.status(409).json({ error: 'This tournament is full. No more players can join.' })
+    } else if ((req.session.points || 0) < tournament.entryFee) {
+      return res.status(402).json({
+        error: `Insufficient points. This tournament requires ${tournament.entryFee} points but you only have ${req.session.points || 0}.`,
+      })
     } else {
+      req.session.points = (req.session.points || 0) - tournament.entryFee
       registrations[id].push({ sessionId, name: userName })
       autoRegistered = true
-      registrationMessage = 'You have been automatically registered for this tournament.'
+      registrationMessage = `You have been registered. ${tournament.entryFee} points deducted.`
       broadcastBracket(id)
     }
   }
@@ -191,6 +206,19 @@ router.get('/tournaments/:id', (req, res) => {
   }
 
   res.json({ user: userName, autoRegistered, registrationMessage, tournament: tournamentPayload })
+})
+
+router.post('/tournaments/:id/reset', (req, res) => {
+  const { id } = req.params
+  const tournament = tournaments.find((t) => String(t.id) === String(id))
+  if (!tournament) return res.status(404).json({ error: 'Tournament not found' })
+
+  registrations[id] = []
+  if (matchWinners[id]) delete matchWinners[id]
+  tournament.status = 'waiting for players'
+
+  broadcastBracket(id)
+  res.json({ ok: true })
 })
 
 router.get('/session', (req, res) => {

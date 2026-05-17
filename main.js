@@ -41,21 +41,32 @@ function broadcastBracket(tournamentId) {
   const tournament = tournaments.find((t) => String(t.id) === String(tournamentId))
   if (!tournament) return
   const bracketData = getBracket(tournamentId, tournament)
-  io.to(`tournament_${tournamentId}`).emit('bracket_updated', { bracket: bracketData.rounds || [] })
+  const rounds = bracketData.rounds || []
+  io.to(`tournament_${tournamentId}`).emit('bracket_updated', { bracket: rounds })
+
+  // Announce tournament winner when the final match is decided
+  if (rounds.length > 0) {
+    const finalMatch = rounds[rounds.length - 1].matches[0]
+    if (finalMatch?.winner) {
+      io.to(`tournament_${tournamentId}`).emit('tournament_winner', { winner: finalMatch.winner })
+    }
+  }
 }
 
-function handleAutoWin(tournamentId, matchId, winnerName) {
+function handleAutoWin(tournamentId, matchId, winnerName, reason = 'timeout') {
   if (!matchWinners[tournamentId]) matchWinners[tournamentId] = {}
   matchWinners[tournamentId][matchId] = winnerName
 
   const roomId = `t${tournamentId}_m${matchId}`
   delete matchLobby[roomId]
 
-  io.to(`tournament_${tournamentId}`).emit('match_result', {
-    matchId,
-    winner: winnerName,
-    reason: 'timeout',
-  })
+  // Notify the bracket page
+  io.to(`tournament_${tournamentId}`).emit('match_result', { matchId, winner: winnerName, reason })
+
+  // Notify anyone still inside the game room (e.g. the player whose opponent just forfeited)
+  if (reason === 'forfeit') {
+    io.to(roomId).emit('opponent_forfeited', { winner: winnerName })
+  }
 
   broadcastBracket(tournamentId)
 }
@@ -104,7 +115,8 @@ io.on('connection', (socket) => {
       }, MATCH_TIMEOUT_MS)
     }
 
-    io.to(`tournament_${tournamentId}`).emit('match_lobby_update', {
+    // Emit to tournament room (bracket watchers) AND match room (the two players specifically)
+    io.to(`tournament_${tournamentId}`).to(roomId).emit('match_lobby_update', {
       matchId,
       players: [...lobby.players],
       timerStartedAt: lobby.timerStartedAt,
@@ -152,6 +164,13 @@ io.on('connection', (socket) => {
       if (!room) return
       socket.to(room).emit(event, data)
     })
+  })
+
+  // Player voluntarily left mid-game — opponent wins
+  socket.on('player_left', ({ tournamentId, matchId, opponentName }) => {
+    if (!tournamentId || !matchId || !opponentName) return
+    if (matchWinners[tournamentId]?.[matchId]) return // already decided
+    handleAutoWin(tournamentId, matchId, opponentName, 'forfeit')
   })
 
   socket.on('disconnect', () => {
